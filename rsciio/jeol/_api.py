@@ -138,17 +138,14 @@ def _draw_marker(img):
 
 def _read_asw(filename, read_marker=False, **kwargs):
     image_list = []
-    fd = open(filename, "br")
-    file_magic = np.fromfile(fd, "<I", 1)[0]
-    if file_magic != 0:
-        _logger.warning("Not a valid JEOL asw format")
-        fd.close()
-        return []
-    fd.seek(12)
-    filetree = _parsejeol(fd)
-    fd.close()
+    with open(filename, "br") as fd:
+        file_magic = np.fromfile(fd, "<I", 1)[0]
+        if file_magic != 0:
+            raise ValueError(f"Not a valid JEOL asw format '{filename}'")
+        fd.seek(12)
+        filetree = _parsejeol(fd)
     filepath, filen = os.path.split(os.path.abspath(filename))
-    if "SampleInfo in filetree:
+    if "SampleInfo" in filetree:
         for i in filetree["SampleInfo"].keys():
             if "ViewInfo" in filetree["SampleInfo"][i]:
                 for j in filetree["SampleInfo"][i]["ViewInfo"].keys():
@@ -169,15 +166,15 @@ def _read_asw(filename, read_marker=False, **kwargs):
                             if len(image_list) > 0 and read_marker:
                                 _draw_marker(image_list[0])
                     else:
-                         _logger.warning(
-                             f"{filename} : SampleInfo[{i}].ViewInfo[{j}] does not have ViewData section."
-                         )
-             else:
-                 _logger.warning(
-                     f"{filename} : SampleInfo[{i}] does not have ViewInfo section."
-                 )
-     else:
-         _logger.warning(f"{filename} does not have SampleInfo section.")
+                        _logger.warning(
+                            f"{filename} : SampleInfo[{i}].ViewInfo[{j}] does not have ViewData section."
+                        )
+            else:
+                _logger.warning(
+                    f"{filename} : SampleInfo[{i}] does not have ViewInfo section."
+                )
+    else:
+        _logger.warning(f"{filename} does not have SampleInfo section.")
     return image_list
 
 

@@ -562,7 +562,7 @@ def test_seq_eds_files():
             zipped.extractall(tmpdir)
 
         # test reading sequential acuired EDS spectrum
-        s = hs.load(Path(tmpdir) / "1" / "1.ASW")
+        s = hs.load(Path(tmpdir) / "1" / "1.ASW", read_marker=True)
         # check if three subfiles are in file (img, eds, eds)
         assert len(s) == 3
         # check positional information in subfiles
@@ -579,6 +579,10 @@ def test_seq_eds_files():
             assert viewdata["Memo"] == memo[i]
         assert isinstance(s[1], hs.signals.EDSTEMSpectrum)
         assert isinstance(s[2], hs.signals.EDSTEMSpectrum)
+        assert "Markers" in s[0].metadata
+        assert "Markers" not in s[1].metadata
+        assert "Markers" not in s[2].metadata
+        assert len(s[0].metadata.Markers) == 4
 
         # test with broken asw file
         fname = Path(tmpdir) / "1" / "1.ASW"
