@@ -108,17 +108,47 @@ def file_reader(filename, **kwargs):
         return []
 
 
-def _read_asw(filename, **kwargs):
-    image_list = []
-    with open(filename, "br") as fd:
-        file_magic = np.fromfile(fd, "<I", 1)[0]
-        if file_magic != 0:
-            raise ValueError(f"Not a valid JEOL asw format '{filename}'")
-        fd.seek(12)
-        filetree = _parsejeol(fd)
+def _draw_marker(img):
+    if "asw" not in img["original_metadata"]:
+        _logger.warning("Information in asw file is needed")
+        return
+    sample_info = img["original_metadata"]["asw"]["SampleInfo"]
+    view_info = sample_info["0"]["ViewInfo"]["0"]
+    (_, _, o_x, o_y) = view_info["PositionMM2"] * 1000 / 2
+    markers_dict = {}
+    for num, items in view_info["ViewData"].items():
+        if items["Memo"] == "":  # index image itself
+            continue
+        (x0, y0, x1, y1) = items["PositionMM2"] * 1000
+        markers_dict["Rect" + num] = {
+            "marker_type": "Rectangle",
+            "data": {"x1": -x0 - o_x, "x2": -x1 - o_x, "y1": y0 + o_y, "y2": y1 + o_y},
+            "marker_properties": {"color": "cyan", "linewidth": 1},
+            "plot_on_signal": True,
+        }
+        markers_dict["Text" + num] = {
+            "marker_type": "Text",
+            "data": {"x1": -x0 - o_x, "y1": y0 + o_y, "text": items["Memo"]},
+            "marker_properties": {"color": "cyan"},
+            "plot_on_signal": True,
+        }
+    img["metadata"]["Markers"] = markers_dict
+    return
 
+
+def _read_asw(filename, read_marker=False, **kwargs):
+    image_list = []
+    fd = open(filename, "br")
+    file_magic = np.fromfile(fd, "<I", 1)[0]
+    if file_magic != 0:
+        _logger.warning("Not a valid JEOL asw format")
+        fd.close()
+        return []
+    fd.seek(12)
+    filetree = _parsejeol(fd)
+    fd.close()
     filepath, filen = os.path.split(os.path.abspath(filename))
-    if "SampleInfo" in filetree:
+    if "SampleInfo in filetree:
         for i in filetree["SampleInfo"].keys():
             if "ViewInfo" in filetree["SampleInfo"][i]:
                 for j in filetree["SampleInfo"][i]["ViewInfo"].keys():
@@ -136,17 +166,8 @@ def _read_asw(filename, **kwargs):
                                 d["original_metadata"]["asw"] = filetree
                                 d["original_metadata"]["asw_viewdata"] = node2
                                 image_list.append(d)
-                    else:
-                        _logger.warning(
-                            f"{filename} : SampleInfo[{i}].ViewInfo[{j}] does not have ViewData section."
-                        )
-            else:
-                _logger.warning(
-                    f"{filename} : SampleInfo[{i}] does not have ViewInfo section."
-                )
-    else:
-        _logger.warning(f"{filename} does not have SampleInfo section.")
-
+                            if len(image_list) > 0 and read_marker:
+                                _draw_marker(image_list[0])
     return image_list
 
 
