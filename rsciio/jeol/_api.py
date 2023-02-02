@@ -168,6 +168,16 @@ def _read_asw(filename, read_marker=False, **kwargs):
                                 image_list.append(d)
                             if len(image_list) > 0 and read_marker:
                                 _draw_marker(image_list[0])
+                    else:
+                         _logger.warning(
+                             f"{filename} : SampleInfo[{i}].ViewInfo[{j}] does not have ViewData section."
+                         )
+             else:
+                 _logger.warning(
+                     f"{filename} : SampleInfo[{i}] does not have ViewInfo section."
+                 )
+     else:
+         _logger.warning(f"{filename} does not have SampleInfo section.")
     return image_list
 
 
@@ -1415,6 +1425,9 @@ def _read_eds(filename, **kwargs):
         }
     ]
 
+    title = "EDX"
+    if "sp_name" in header and header["sp_name"] != "":
+        title = header["sp_name"] + " : EDX"
     metadata = {
         "Acquisition_instrument": {
             mode: {
@@ -1434,7 +1447,7 @@ def _read_eds(filename, **kwargs):
             "original_filename": os.path.basename(filename),
             "date": header["filedate"].date().isoformat(),
             "time": header["filedate"].time().isoformat(),
-            "title": "EDX",
+            "title": title,
         },
         "Signal": {
             "record_by": "spectrum",
