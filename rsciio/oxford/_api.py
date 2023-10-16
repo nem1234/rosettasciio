@@ -51,7 +51,81 @@ from rsciio._docstrings import FILENAME_DOC, LAZY_DOC, RETURNS_DOC
 
 _logger = logging.getLogger(__name__)
 
-class _binary_metadata:
+class Utils:
+    def _get_simple_binary_block(self, length):
+        _data = self.data[0:length]
+        self._rseek(length)
+        return _data
+
+    def _get_string(self, data=None):
+        if data is None:
+            byte_length = self.data[0]
+            _data = self.data[1:1 + byte_length]
+            self._rseek(1 + byte_length)
+            return _data.decode()
+        else:
+            byte_length = data[0]
+            return data[1:1 + byte_length], data[1 + byte_length:]
+
+
+
+    def _get_num(self, type_str, data):
+        _len = struct.calcsize(type_str)
+        if data is None:
+            _data = struct.unpack(type_str, self.data[0:_len])
+            self._rseek(_len)
+        else:
+            _data = struct.unpack(type_str, data[0:_len])
+            data = data[_len:]
+        if data is None:
+            if len(_data) == 1:
+                return _data[0]
+            return _data
+        else:
+            if len(_data) == 1:
+                return _data[0], data
+            return _data, data
+
+    def _get_type(self, data=None):
+        return self._get_num('<B', data)
+
+    def _get_byte(self, data=None):
+        return self._get_num('<B', data)
+
+    def _get_ulong(self, data=None):
+        return self._get_num('<L', data)
+
+    def _get_long(self, data=None):
+        return self._get_num('<l', data)
+
+    def _get_ushort(self, data=None):
+        return self._get_num('<H', data)
+
+    def _get_short(self, data=None):
+        return self._get_num('<h', data)
+
+    def _get_float(self, data=None):
+        return self._get_num('<f', data)
+
+    def _get_double(self, data=None):
+        return self._get_num('<d', data)
+
+    def __init__(self):
+        self.data = b''
+
+    def _dump_bytes_debug(self, data=None):
+        if data is None:
+            _len = len(self.data)
+            if _len > 16:
+                _len = 16
+            data = self.data[0:16]
+        string = ""
+        for ch in data:
+            string += f'{np.uint8(ch):02x} '
+        return string
+
+
+class _BinaryMetadata(Utils):
     def __init__(self):
         """Parameters:
         ----------------
@@ -60,15 +134,19 @@ class _binary_metadata:
         """
         self.original_data = None
         self.data = None
+        self.datanodes = None
+        self.debug = 2
 
     def _tell(self):
         return len(self.original_data)-len(self.data)
 
     def _seek(self, offset):
-        if offset < 0 or offset >= len(self.original_data):
+        if offset < 0 or offset > len(self.original_data):
+            print("Seek offset = ", offset, '/', len(self.original_data))
             _logger.warning('Data length is shorter than offset')
         self.data = self.original_data[offset:]
     def _rseek(self, offset):
+#        print("rseek offset = ", offset)
         self._seek(self._tell() + offset)
 
     def _decode_metadata_internal(self):
@@ -89,22 +167,22 @@ class _binary_metadata:
         with open("test.bin", "wb") as f:
             f.write(self.data)
 
-        tp = self._get_type()
-#        if tp != 0x40:
-        if tp not in (0x40, 0x5e, 0x5f, 0x61):
-            print(f"Unknown type: {tp:02x}")
+        block_type = self._get_type()
+#        if block_type != 0x40:
+        if block_type not in (0x40, 0x5e, 0x5f, 0x61):
+            print(f"Unknown type: {block_type:02x}")
             return {}
         block["name"] = self._get_string()
         print(self.data)
         while len(self.data) > 0:
             ptr = self._tell() # keep original pointer
-            tp = self._get_type()
-            if tp == 0x01:
+            block_type = self._get_type()
+            if block_type == 0x01:
                 if subblock_name is not None:
                     subblock_name = None
                 else:
                     break
-            elif tp in (0x40, 0x5e, 0x5f, 0x61): # Block
+            elif block_type in (0x40, 0x5e, 0x5f, 0x61): # Block
                 block_name = self._get_string()
                 if block_name == "Blob":
                     block["values"].append(self._get_binary_block())
@@ -114,139 +192,71 @@ class _binary_metadata:
                     block[block_name]=_t
                 else:
                     self._seek(ptr)
+                    print("child=", self._dump_bytes_debug())
                     _child = self._decode_metadata_internal()
                     block["children"].append(_child)
-            elif tp == 0x5e or tp == 0x5f or tp == 0x61:
+            elif block_type in (0x5e, 0x5f, 0x61):
                 subblock_name = self._get_string()
                 ptr = self._tell()
-                tp = self._get_type()
-                #if tp == 0x2e:
+                block_type = self._get_type()
+                #if block_type == 0x2e:
                 #    # skip data type
                 #    _attr_type = self._get_string()
                 #    _attr_data = self._get_binary_block()
                 _value = self._get_binary_block()
                 if subblock_name not in block:
                     block[subblock_name] = []
-                if type(block[subblock_name]) is not list:
+                if not isinstance(block[subblock_name], list):
                     block[subblock_name] = [block[subblock_name]]
-            elif tp == 0x60:
+            elif block_type == 0x60:
                 block_name = "struct"
                 __data_type = self._get_string()  # "anyData"
-            elif tp == 0x2e:  # Attribute
+            elif block_type == 0x2e:  # Attribute
                 _typ = self._get_string()
                 if _typ == "type":
                     self._rseek(1)
                     _type = self._get_string()
                     block[_typ] = _type
-            elif tp == 0x08:   # NameSpace ?
+            elif block_type == 0x08:   # NameSpace ?
                 namespace = self._get_string()
                 block["namespace"] = namespace
-            elif tp == 0x09: # Scheme
+            elif block_type == 0x09: # Scheme
                 _typ_unknown = self._get_type()
                 _typ2 =  self._get_type()
                 scheme = self._get_string()
                 block["scheme"]  = scheme
-            elif tp == 0x86: # unknown, skip 1 byte
+            elif block_type == 0x86: # unknown, skip 1 byte
                 self._get_byte()
             else:
-                print(f"Unknown {tp:02x} ", self._dump_bytes(self.data[0:16]))
+                print(f"Unknown {block_type:02x} ", self._dump_bytes_debug())
         return block
 
-    def _get_binary_block(self, tp=None):
-        data = self.data
-        if tp is None:
-            tp = self._get_type()
+    def _get_binary_block(self, block_type=None):
+        if block_type is None:
+            block_type = self._get_type()
         _blk = b''
         while True:
-            if tp in (0x9e, 0x9f,0x98):
+            if block_type in (0x9e, 0x9f,0x98):
                 _blen = self._get_type()
-                _blk += data[0:_blen]
-                data = data[_blen:]
-            elif tp == 0xa0:
-                _blen = data[0] + 256 * data[1]
-                _blk += data[2:2+_blen]
-                data = data[2+_blen:]
-            elif tp == 0x97: # Date Time 8 bytes ??
-                _blk = data[0:8]
-                data = data[8:]
-            elif tp == 0x8b: # OffsetMinutes (TZ), 3 bytes
-                _blk = struct.unpack('<h', data[0:2])[0]
-                data = data[2:]
-            elif tp == 0x86: # unknown, skip 1 bytes
-                data = data[1:]
-            if tp in (0x86, 0x8b, 0x97, 0x98, 0x9f):  # Single block data or End of data
+                _blk += self._get_simple_binary_block(_blen)
+            elif block_type == 0xa0:
+                _blen = self._get_ushort()
+                _blk += self._get_simple_binary_block(_blen)
+            elif block_type == 0x97: # Date Time 8 bytes ??
+                _blk = self._get_simple_binary_block(8)
+            elif block_type == 0x8b: # OffsetMinutes (TZ), 3 bytes
+                _blk = self._get_short()
+            elif block_type == 0x86: # unknown, skip 1 bytes
+                _ = self.get_byte()
+            if block_type in (0x86, 0x8b, 0x97, 0x98, 0x9f):  # Single block data or End of data
                 break
-            if tp == 1:  # End of data block?
+            if block_type == 1:  # End of data block?
                 break
-            tp = self._get_type()
-        if tp == 0x98:
+            block_type = self._get_type()
+        if block_type == 0x98: # convert to text
             _blk = _blk.decode()
-        self.data = data
         return _blk
 
-    def _get_string(self):
-        byte_length = self.data[0]
-        _data = self.data[1:1 + byte_length]
-        self._rseek(1 + byte_length)
-        print(_data)
-        return _data.decode()
-
-    def _get_type(self):
-        _data = self.data[0]
-        self._rseek(1)
-        return _data
-
-    def _get_byte(self):
-        _data = self.data[0]
-        self.data = self.data[1:]
-        return _data
-
-    def _get_num(self, type_str):
-        _len = struct.calcsize(type_str)
-        _data = struct.unpack(type_str, self.data[0:_len])
-        self.seek(_len)
-        if len(_data) == 1:
-            return _data[0]
-        else:
-            return _data
-
-    def _get_long(self):
-        return self._get_num('<l')
-
-    def _get_short(self, data):
-        return self._get_num('<h')
-
-    def _get_float(self, data):
-        return self._get_num('<f')
-
-    def _get_double(self, data):
-        return self._get_num('<d')
-
-    def _post_proc_ElectronImage(self, dic):
-        print("Dic=",dic)
-        _uuid = self._decode_uuid(dic["values"][0][4:20])
-        _dat = dic["values"][1]
-        if _dat[4] == 0:
-            dic['title'], _dat = self._get_string(_dat[5:])
-        _s = struct.unpack('<llll', _dat[0:16])
-        dic['width'] = _s[1]
-        dic['height'] = _s[2]
-        dic['offset'] = _s[3]
-        dic['_unknown0'] = struct.unpack('<fffff', _dat[16:36])
-        dic['File_UUID'] = self._decode_uuid(_dat[36:52])
-        dic['_unknown1'] = struct.unpack('<ddd', _dat[56:])
-        _dat = dic["imageDataCore.TileSizes.TileSizeInfo"]["values"][0]
-        _s = struct.unpack('<llll', _dat[0:16])
-        dic['preview_width'] = _s[1]
-        dic['preview_height'] = _s[2]
-        dic['preview_offset'] = _s[3]
-        dic['_unknown_preview'] = self._dump_bytes(_dat[16:])
-        _dat = dic["values"][2]
-        dic['_unknown2'] = struct.unpack('<llfll', _dat[0:20])
-        dic['signal'], _ = self._get_string(_dat[21:])
-        dic['pixel'] = dic["ElectronImage.imageDataCore.type"]
-        self._post_proc_cleanup(dic, ['values',])
-        return { _uuid: dic }
 
 
     def decode_metadata(self, row, columns):
@@ -255,21 +265,66 @@ class _binary_metadata:
         print(columns)
         self.original_data = row[columns["Data"]]
         self.data = self.original_data
-        _dict, _ = self._decode_metadata_internal()
-        _dict = tools.DTBox(self._convert_metadata_to_dict(_dict),
-            box_dots=True, default_box=True)
+        _dict = self._decode_metadata_internal()
         return _dict
 
 
 
+
+class MetaData(Utils):
+    def _convert_metadata_to_dict_internal(self, dic):
+        for _key, _item in list(dic.items()):
+            if _key == "Blob":
+                dic["values"].append(_item)
+            elif _key == "children":
+                for _child in _item:
+                    _childdict = self._convert_metadata_to_dict_internal(_child)
+                    dic[_child["name"]] = _childdict
+        if "Blob" in dic:
+            del dic["Blob"]
+        del dic["children"]
+        return dic
+
+    def _convert_metadata_to_dict(self, raw_dict):
+        _dict = self._convert_metadata_to_dict_internal(raw_dict)
+        return _dict
+
+
+    def _decode_uuid(self, bin_uuid):
+        _b = bin_uuid
+        _uuid = f'{_b[3]:02x}{_b[2]:02x}{_b[1]:02x}{_b[0]:02x}-' \
+            f'{_b[5]:02x}{_b[4]:02x}-{_b[7]:02x}{_b[6]:02x}-' \
+            f'{_b[8]:02x}{_b[9]:02x}-{_b[10]:02x}{_b[11]:02x}' \
+            f'{_b[12]:02x}{_b[13]:02x}{_b[14]:02x}{_b[15]:02x}'
+        return _uuid
+
+    def _get_dict(self, data, dtype='<d', dlen=8):
+        # decode parameter list paired with its name
+        _n_data, data = self._get_long(data)
+        _keys = []
+        _vals = []
+        for i in range(_n_data):
+            _len, data = self._get_byte(data[1:])
+            _keys.append(data[0:_len].decode())
+            data = data[_len:]
+        _, data = self._get_long(data)  # should be same as _n_data
+        for i in range(_n_data):
+            _val = struct.unpack(dtype, data[0:dlen])[0]
+            data = data[dlen:]
+            _vals.append(_val)
+        return dict(zip(_keys, _vals)), data
+
+    #
+    # record type specific decoding functions
+    #
     def _post_proc_Project(self, dic, **kwargs):
-        """ Currently only TimeZone data is used.
-        """
-        dic = {}
-        dic['UUID'] = self._decode_uuid(dic["values"][0][4:20])
-        dic['DataCounters'], _ = self._get_dict(dic['DataCounters']['values'][0][4:], '<l', 4)
-        dic['OffsetMinutes'] = dic['CreatedOn']['OffsetMinutes']
+        # Currently only TimeZone data is used.
+        new_dic = {}
+        new_dic['UUID'] = self._decode_uuid(dic["values"][0][4:20])
+        new_dic['DataCounters'], _ = self._get_dict(dic['DataCounters']['values'][0][4:], '<l', 4)
+        new_dic['OffsetMinutes'] = dic['CreatedOn']['OffsetMinutes']
         self.time_zone = dic['CreatedOn']['OffsetMinutes']
+        dic = self._post_proc_cleanup(new_dic)
         return dic
 
     def _post_proc_DataNode(self, dic):
@@ -292,49 +347,31 @@ class _binary_metadata:
         else:
             _dat = _dat[45:]
         if len(_dat) > 0:
-            new_dic['Unknown3'] = self._dump_bytes(_dat)
+            new_dic['Unknown3'] = self._dump_bytes_debug(_dat)
         return {uuid: new_dic}
-    def _decode_uuid(self, bin_uuid):
-        _b = bin_uuid
-        _uuid = f'{_b[3]:02x}{_b[2]:02x}{_b[1]:02x}{_b[0]:02x}-' \
-            f'{_b[5]:02x}{_b[4]:02x}-{_b[7]:02x}{_b[6]:02x}-' \
-            f'{_b[8]:02x}{_b[9]:02x}-{_b[10]:02x}{_b[11]:02x}' \
-            f'{_b[12]:02x}{_b[13]:02x}{_b[14]:02x}{_b[15]:02x}'
-        return _uuid
 
-    def _get_dict(self, data, dtype='<d', dlen=8):
-        _n_data, data = self._get_long(data)
-        _keys = []
-        _vals = []
-        for i in range(_n_data):
-            _len, data = self._get_byte(data[1:])
-            _keys.append(data[0:_len].decode())
-            data = data[_len:]
-        _, data = self._get_long(data)  # should be same as _n_data
-        for i in range(_n_data):
-            _val = struct.unpack(dtype, data[0:dlen])[0]
-            data = data[dlen:]
-            _vals.append(_val)
-        return dict(zip(_keys, _vals)), data
 
-    def _dump_bytes(self, dt):
-        dt1 = dt
-        pos = 0
-        string = ""
-        for ch in dt:
-            string += f'{np.uint8(ch):02x} '
-        return string
-
-    def _post_proc_cleanup(self, dic, dellist=None):
-        for _key, _val in dic.items():
-            if type(_val) != dict:
-                continue
-            if type(_val) == dict and len(_val) == 0:
-                dellist.append(_key)
-            if 'value' in _val and type(_val['value']) == bytes:
-                dic[_key] = self._dump_bytes(_val['value'])
-        for _itm in dellist:
-            del dic[_itm]
+    def _post_proc_cleanup(self, dic, dellist=[]):
+        _dellist = []
+        if isinstance(dic, dict):
+            for _key, _val in dic.items():
+                if _key in dellist:
+                    _dellist.append(_key)
+                if isinstance(_val, list) or isinstance(_val, dict):
+                    self._post_proc_cleanup(_val, dellist)
+                if _key == 'values' and isinstance(_val, list):
+                    _dellist.append(_key)
+                    # dic[_key] = [self._dump_bytes_debug(_v[0:16]) for _v in _val]
+            _dellist.extend(dellist)
+            print(_dellist)
+            for _itm in _dellist:
+                print("Deleting ", _itm)
+                if _itm in dic:
+                    del dic[_itm]
+        elif isinstance(dic, list):
+            for _val in dic:
+                if isinstance(_val, list) or isinstance(_val, dict):
+                    self._post_proc_cleanup(_val, dellist)
         return dic
 
 
@@ -357,16 +394,134 @@ class _binary_metadata:
             _v0 = struct.unpack("<ldddddd",dic["region.mapArea"]['values'][0])
             # _v1 = struct.unpack("<lldddllllldlll",dic["region.mapArea"]['values'][1])
             new_dic["mapArea"] = _v0
-
         # print(self._dump_bytes(dic["OINA.Mustang.Data.Regions.region"]["value"][1]))
         # dic["OINA.Mustang.Data.Regions.region"] = \
         #     struct.unpack("<dddd", dic["OINA.Mustang.Data.Regions.region"]["value"][1][4:])
         # self._post_proc_cleanup(dic, ['AreaOfInterest'])
         # new_dic[_uuid] = copy.deepcopy(dic)
-        return { _uuid : new_dic }
+        return { _uuid: new_dic }
 
+    def _post_proc_ElectronImage(self, dic):
+        print("Dic=",dic)
+        _uuid = self._decode_uuid(dic["values"][0][4:20])
+        _dat = dic["values"][1]
+        if _dat[4] == 0:
+            dic['title'], _dat = self._get_string(_dat[5:])
+        _s = struct.unpack('<llll', _dat[0:16])
+        dic['width'] = _s[1]
+        dic['height'] = _s[2]
+        dic['offset'] = _s[3]
+        dic['_unknown0'] = struct.unpack('<fffff', _dat[16:36])
+        dic['File_UUID'] = self._decode_uuid(_dat[36:52])
+        dic['_unknown1'] = struct.unpack('<ddd', _dat[56:])
+        _dat = dic["imageDataCore.TileSizes.TileSizeInfo"]["values"][0]
+        _s = struct.unpack('<llll', _dat[0:16])
+        dic['preview_width'] = _s[1]
+        dic['preview_height'] = _s[2]
+        dic['preview_offset'] = _s[3]
+        dic['_unknown_preview'] = self._dump_bytes_debug(_dat[16:])
+        _dat = dic["values"][2]
+        dic['_unknown2'] = struct.unpack('<llfll', _dat[0:20])
+        dic['signal'], _ = self._get_string(_dat[21:])
+        dic['pixel'] = dic["ElectronImage.imageDataCore.type"]
+        self._post_proc_cleanup(dic, ['values',])
+        return { _uuid: dic }
+
+
+
+    def __init__(self):
+        self.debug = 2
+
+    def decode_metadata(self, cur, table):
+        """
+        Parameters:
+        ----------------
+          cur: sqlite3 cursor
+          columns: dict
+             column type list in record
+
+        Returns:
+        ----------------
+          metadata: dict
+        """
+
+        # SQLite3 DB record structures
+        # Data Name, [Supported (1: Fullly, 0: Not, -1: Partly), Column names in DB]
+        _DB_TABLES = {
+            "Project": [ -1, 'UUID', 'Unknown', 'ProjectTitle', 'Unknown2', 'Data' ],
+            "DataNodes": [ 1, 'UUID', 'Unknown', 'Sort', 'UUID_parent',
+                           'UUID_data', 'Type', 'Data' ],
+            "ExtraData": [ 0, 'UUID', 'Unknown', 'Data' ],
+            "Samples": [ 0, 'UUID', 'Unknown', 'SampleName', 'Data' ],
+            "Elements": [ 0, 'UUID', 'Unknown', 'Data' ],
+            "Analyses": [ 0, 'UUID', 'Unknown', 'AreaName', 'Data' ],
+            "ElectronImages": [ 1, 'UUID', 'Unknown', 'ImageName', 'DateTime', 'Data' ],
+            "Display256LinearARGBData": [ 0, 'UUID', 'Unknown', 'Data' ],
+            "AreaOfInterests": [ 1, 'UUID', 'Unknown', 'Data' ],
+            "FsdAcquires": [ 0, 'UUID', 'Unknown', 'DataName', 'Data' ],
+            "FsdChannels": [ 0, 'UUID', 'Unknown', 'ChannelName', 'Data' ],
+            "FsdMixedImages": [ 0, 'UUID', 'Unknown', 'ImageName', 'Data' ],
+            "DisplayARGBData": [0, 'UUID', 'Unknown', 'Data' ],
+            "EDXSpectra": [ -1, 'UUID', 'Unknown', 'SpectrumName', 'DateTime', 'Data' ],
+            "IdentifiedElements": [ 0, 'UUID', 'Unknown', 'Data' ],
+            "QuantResults": [ 0, 'UUID', 'Unknown', 'Data' ],
+            "XrayMapImages": [ 0, 'UUID', 'Unknown', 'Xray' ,'DateTime', 'Data' ],
+            "LayerMaps": [ 0, 'UUID', 'Unknown', 'Data' ],
+            "TileGroups": [ 0, 'UUID', 'Unknown', 'UUID-Unknwon', 'Data' ],
+            "FileGroups": [ 0, 'UUID', 'Unknown', '_Data' ],
+            "SmartMaps": [ 0, 'UUID', 'Unknown', 'DataName', 'Data', 'Unknown2' ],
+            "EbsdMapImages": [ 0, 'UUID', 'Unknown', 'ImageName', 'DateTime', 'Data' ],
+            "DisplayIndexedARGBData": [ 0, 'UUID', 'Unknown', 'Data' ],
+            "EbsdMaps": [0, 'UUID', 'Unknown', 'DataName', 'Data'],
+            "MapAcquires": [0, 'UUID', 'Unknown', 'DataName', 'Data'],
+        }
+        data = tools.DTBox(box_dots=True, default_box=True)
+
+        # Get data column number from table definition
+        if table not in _DB_TABLES:
+            if self.debug > 1:
+                _logger.warning(f"{tbl} is not found in known DB tables.")
+                return None
+        column_table = {}
+        _columns = _DB_TABLES[table].copy()
+        supported = _columns.pop(0)
+        for _i, _column in enumerate(_columns):
+            column_table[_column] = _i
+
+        if supported == 0:
+            if self.debug > 1:
+                _logger.warning(f"{table} is not supported yet.")
+            return None
+        cur.execute("SELECT * FROM " + table)
+        _items = []
+        _metadata = []
+        for row in cur:
+            _metadata.append(self.decode_metadata_record(table, row, column_table))
+            # remove binary data
+            row = list(row)
+            del row[column_table["Data"]]
+            _items.append(row)
+
+        data[table]["columns"] = column_table.copy()
+        data[table]["db_items"] = copy.deepcopy(_items)
+        data[table]["metadata"] = copy.deepcopy(_metadata)
+        return data
+
+    def decode_metadata_record(self, table, row, column_list):
+        bin_dec = _BinaryMetadata()
+        _dict = bin_dec.decode_metadata(row, column_list)
+        _dict = tools.DTBox(self._convert_metadata_to_dict(_dict),
+            box_dots=True, default_box=True)
+        if table in self.POST_PROC:
+            metadata = self.POST_PROC[table](self, _dict)
+        else:
+            # currently unsupported tables
+            metadata = _dict
+            # metadata = {}
+        return metadata
+
+    # list of table specific decoders
     POST_PROC = {
-        # Table name,  [ table specific metadata decoder,  image file reader ]
         "Project": _post_proc_Project,
         "DataNodes": _post_proc_DataNode,
         "AreaOfInterests": _post_proc_AreaOfInterest,
@@ -434,14 +589,12 @@ class OxfordOipx:
 
 
     def read_oipx(self, fname):
-        self.data_dir = Path(fname).parent / "data"
+        data_dir = Path(fname).parent / "data"
 
-        debug = 2
-
-        tables = []
         images = []
         data = tools.DTBox(box_dots=True, default_box=True)
         metadata = tools.DTBox()
+        metadata_decoder = MetaData()
 
         # connect to SQLite3 DB
         datanodes = None
@@ -452,63 +605,16 @@ class OxfordOipx:
 
         # get table list
         cur.execute("SELECT * FROM sqlite_master")
+        tables = []
         for row in cur:
             if row[0] == 'table':
                 tables.append(row[1])
-            # else:
-            #    # skipping index
-            #    pass
 
-        if debug > 0:
-            for tbl in tables:
-                if tbl not in self.DB_TABLES:
-                    print("Table=", tbl, ", Supported=", supported, "Columns=", columns)
-
+        _metadata = []
         for tbl in tables:
-            # Get data column number from table definition
-            if tbl not in self.DB_TABLES:
-                if debug > 1:
-                    _logger.warning(f"{tbl} is not found in known DB tables.")
-                continue
-            columns = {}
-            _columns = self.DB_TABLES[tbl].copy()
-            supported = _columns.pop(0)
-            for _i, _column in enumerate(_columns):
-                columns[_column] = _i
-            print("Columns=", columns)
-
-            if supported == 0:
-                if debug > 1:
-                    _logger.warning(f"{tbl} is not supported yet.")
-                continue
-
-            # read tables
-            cur.execute("SELECT * FROM " + tbl)
-            _items = []
-            _metadata = []
-            for row in cur:
-                _metadata_decoder = _binary_metadata()
-                _metadata.append(_metadata_decoder.decode_metadata(row, columns))
-                # remove binary data
-                row = list(row)
-                del row[columns["Data"]]
-                _items.append(row)
-
-            data[tbl]["columns"] = columns.copy()
-            data[tbl]["db_items"] = copy.deepcopy(_items)
-            data[tbl]["metadata0"] = copy.deepcopy(_metadata)
-
-            _md1 = tools.DTBox(box_dots=True, default_box=True)
-            if tbl in self.POST_PROC:
-                _proc = (self.POST_PROC)[tbl][0]
-                for _metadata in data[tbl]["metadata0"]:
-                    _md = _proc(self, _metadata)
-                    _md1.merge_update(_md)
-                data[tbl]["metadata"] = copy.deepcopy(_md1)
-
-        print(data['DataNodes'])
+            _metadata.append(metadata_decoder.decode_metadata(cur, tbl))
+        print(_metadata)
         sys.exit(1)
-
         for tbl in ("ElectronImages", "EDXSpectra"):
             if tbl in self.POST_PROC:
                 _proc = (self.POST_PROC)[tbl][1]
@@ -516,42 +622,6 @@ class OxfordOipx:
         conn.close()
         print("Dataset = ", data)
         return images
-
-    def dumpbytes(self, dt):
-        result = ''
-        dt1 = dt
-        dt2 = dt
-        pos = 0
-        while len(dt)>0:
-            length  = 16
-            if len(dt) < 16:
-                length = len(dt)
-            string = ""
-            for pos in range(length):
-                x = np.uint8(dt[pos])
-                string += f'{dt[pos]:02x} '
-            result += string + "\n"
-            dt = dt[16:]
-        while len(dt1) >= 4:
-            x=struct.unpack('<f', dt1[0:4])[0]
-            dt1 = dt1[4:]
-            result += f"{x} "
-        result += "\n"
-        while len(dt2) >= 8:
-            x=struct.unpack('<d', dt2[0:8])[0]
-            dt2 = dt2[8:]
-            result += f"{x} "
-        result += "\n"
-        return result
-
-    def _dump_bytes_debug(self, data):
-        string = ""
-        for ch in data:
-            string += f'{np.uint8(ch):02x} '
-        return string
-
-    def _get_type(self):
-        return self.data.pop(0)
 
     def _set(self, dct, tag_name, val):
         _d = dct
@@ -597,23 +667,6 @@ class OxfordOipx:
         dic.add_node(key)
         dic[key] = copy.deepcopy(block)
 
-    def _convert_metadata_to_dict_internal(self, dic):
-        for _key, _item in list(dic.items()):
-            if _key == "Blob":
-                dic["values"].append(_item)
-            elif _key == "children":
-                for _child in _item:
-                    _childdict = self._convert_metadata_to_dict_internal(_child)
-                    dic[_child["name"]] = _childdict
-        if "Blob" in dic:
-            del dic["Blob"]
-        del dic["children"]
-        return dic
-
-    def _convert_metadata_to_dict(self, raw_dict):
-        _dict = self._convert_metadata_to_dict_internal(raw_dict)
-        return _dict
-
 
     def __init__(self):
         pass
@@ -645,7 +698,7 @@ class OxfordOipx:
         _w = _om["width"]
         _h = _om["height"]
         _offset = _om["offset"] * _pix_depth  # may be broken when EDS
-        _filename = self.data_dir / (original_metadata["File_UUID"] + ".dat").lower()
+        _filename = data_dir / (original_metadata["File_UUID"] + ".dat").lower()
         with open(_filename, "rb") as f:
             print(_offset)
             #  f.seek(_offset)  # may be broken when EDS
@@ -781,36 +834,6 @@ class OxfordOipx:
         return _dictionary
 
 
-    # Data Name, [Supported (1: Fullly, 0: Not, -1: Partly), Column names in DB]
-    DB_TABLES = {
-        "Project": [ -1, 'UUID', 'Unknown', 'ProjectTitle', 'Unknown2', 'Data' ],
-        "DataNodes": [ 1, 'UUID', 'Unknown', 'Sort', 'UUID_parent',
-                       'UUID_data', 'Type', 'Data' ],
-        "ExtraData": [ 0, 'UUID', 'Unknown', 'Data' ],
-        "Samples": [ 0, 'UUID', 'Unknown', 'SampleName', 'Data' ],
-        "Elements": [ 0, 'UUID', 'Unknown', 'Data' ],
-        "Analyses": [ 0, 'UUID', 'Unknown', 'AreaName', 'Data' ],
-        "ElectronImages": [ 1, 'UUID', 'Unknown', 'ImageName', 'DateTime', 'Data' ],
-        "Display256LinearARGBData": [ 0, 'UUID', 'Unknown', 'Data' ],
-        "AreaOfInterests": [ 1, 'UUID', 'Unknown', 'Data' ],
-        "FsdAcquires": [ 0, 'UUID', 'Unknown', 'DataName', 'Data' ],
-        "FsdChannels": [ 0, 'UUID', 'Unknown', 'ChannelName', 'Data' ],
-        "FsdMixedImages": [ 0, 'UUID', 'Unknown', 'ImageName', 'Data' ],
-        "DisplayARGBData": [0, 'UUID', 'Unknown', 'Data' ],
-        "EDXSpectra": [ -1, 'UUID', 'Unknown', 'SpectrumName', 'DateTime', 'Data' ],
-        "IdentifiedElements": [ 0, 'UUID', 'Unknown', 'Data' ],
-        "QuantResults": [ 0, 'UUID', 'Unknown', 'Data' ],
-        "XrayMapImages": [ 0, 'UUID', 'Unknown', 'Xray' ,'DateTime', 'Data' ],
-        "LayerMaps": [ 0, 'UUID', 'Unknown', 'Data' ],
-        "TileGroups": [ 0, 'UUID', 'Unknown', 'UUID-Unknwon', 'Data' ],
-        "FileGroups": [ 0, 'UUID', 'Unknown', '_Data' ],
-        "SmartMaps": [ 0, 'UUID', 'Unknown', 'DataName', 'Data', 'Unknown2' ],
-        "EbsdMapImages": [ 0, 'UUID', 'Unknown', 'ImageName', 'DateTime', 'Data' ],
-        "DisplayIndexedARGBData": [ 0, 'UUID', 'Unknown', 'Data' ],
-        "EbsdMaps": [0, 'UUID', 'Unknown', 'DataName', 'Data'],
-        "MapAcquires": [0, 'UUID', 'Unknown', 'DataName', 'Data'],
-    }
-
 
 
 
@@ -872,11 +895,10 @@ g        The downsample ratio of the navigation dimension of an EDS
     %s
     """
     file_ext = os.path.splitext(filename)[-1][1:].lower()
-    if file_ext in extension_to_reader_mapping:
-        return extension_to_reader_mapping[file_ext](filename, **kwargs)
-    else:
+    if file_ext not in extension_to_reader_mapping:
         _logger.info(f"{filename} : File type {file_ext} is not supported. Skipping")
         return []
+    return extension_to_reader_mapping[file_ext](filename, **kwargs)
 
 file_reader.__doc__ %= (FILENAME_DOC, LAZY_DOC, RETURNS_DOC)
 
